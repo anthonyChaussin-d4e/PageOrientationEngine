@@ -6,7 +6,10 @@ using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
+
 using PageOrientationEngine.Helpers;
+
 using Tesseract;
 
 namespace PageOrientationEngine
@@ -23,6 +26,11 @@ namespace PageOrientationEngine
         PageCorrect,
 
         /// <summary>
+        /// The text on the page is rotated to the right
+        /// </summary>
+        PageRotatedRight,
+
+        /// <summary>
         /// The text on the page is upside down
         /// </summary>
         PageUpsideDown,
@@ -31,11 +39,6 @@ namespace PageOrientationEngine
         /// The text on the page is rotated to the left
         /// </summary>
         PageRotatedLeft,
-
-        /// <summary>
-        /// The text on the page is rotated to the right
-        /// </summary>
-        PageRotatedRight,
 
         /// <summary>
         /// The quality of text on the page is to bad to determine the orientation of the page
@@ -84,7 +87,7 @@ namespace PageOrientationEngine
         /// <summary>
         /// Contains all the result of the page orientation detection
         /// </summary>
-        private ConcurrentDictionary<int, DocumentInspectorPageOrientation> _detectionResult;
+        private Dictionary<int, DocumentInspectorPageOrientation> _detectionResult;
         #endregion
 
         #region Properties
@@ -119,20 +122,9 @@ namespace PageOrientationEngine
         /// </summary>
         private void ProcessWorkQueue()
         {
-            WorkQueueItem workQueueItem;
-            while (_workQueue.TryDequeue(out workQueueItem))
-            {
+            while (_workQueue.TryDequeue(out WorkQueueItem workQueueItem))
                 using (var bitmap = Image.FromStream(workQueueItem.MemoryStream) as Bitmap)
-                {
-                    var succes = false;
-                    while (!succes)
-                    {
-                        succes = _detectionResult.TryAdd(workQueueItem.PageNumber,
-                                                         DetectPageOrientation(bitmap));
-                        Thread.Sleep(10);
-                    }
-                }
-            }
+                    _detectionResult.Add(workQueueItem.PageNumber, DetectPageOrientation(bitmap));
         }
         #endregion
 
@@ -143,9 +135,9 @@ namespace PageOrientationEngine
         /// </summary>
         /// <param name="memoryStreams"></param>
         /// <returns></returns>
-        public List<DocumentInspectorPageOrientation> DetectPageOrientation(List<MemoryStream> memoryStreams)
+        public Dictionary<int, DocumentInspectorPageOrientation> DetectPageOrientation(List<MemoryStream> memoryStreams)
         {
-            _detectionResult = new ConcurrentDictionary<int, DocumentInspectorPageOrientation>();
+            _detectionResult = new Dictionary<int, DocumentInspectorPageOrientation>();
             _workQueue = new ConcurrentQueue<WorkQueueItem>();
 
             // WorkQueue vullen
@@ -177,21 +169,21 @@ namespace PageOrientationEngine
             while (!workDone)
             {
                 for (i = 0; i < procCount; i++)
-                    workDone = threads[i].Join(10);
+                    workDone = threads[i].Join(1000*60);
             }
 
-            return _detectionResult.Select(detectionResult => detectionResult.Value).ToList();
+            return _detectionResult;
         }
-        
+
         /// <summary>
         /// Returns a list with <see cref="DocumentInspectorPageOrientation">DocumentInspectorPageOrientations</see>
         /// according to the amount of "pages" in the <paramref name="inputFile"/>
         /// </summary>
         /// <param name="inputFile">The input file</param>
         /// <returns></returns>
-        public List<DocumentInspectorPageOrientation> DetectPageOrientation(string inputFile)
+        public Dictionary<int, DocumentInspectorPageOrientation> DetectPageOrientation(string inputFile)
         {
-            return DetectPageOrientation(TiffUtils.SplitTiffImage(inputFile));
+            return DetectPageOrientation(TiffUtils.SplitTiffImage(inputFile)).OrderBy(d => d.Key).ToDictionary(k => k.Key, v => v.Value);
         }
 
         /// <summary>
@@ -206,122 +198,12 @@ namespace PageOrientationEngine
                 throw new NullReferenceException("The bitmap parameter is not set");
 
             if (bitmap.PixelFormat == PixelFormat.Format1bppIndexed)
-                bitmap = BitmapUtils.CopyToBpp(bitmap, 8);
+                bitmap = BitmapUtils.CopyToBpp(bitmap, 1);
 
             using (var engine = new TesseractEngine(TesseractDataPath, TesseractLanguage))
-            {
-                var rect = new Rect();
-
-                using (var image = PixConverter.ToPix(bitmap))
-                using (var page = engine.Process(image, PageSegMode.AutoOsd))
-                {
-                    var pageIterator = page.AnalyseLayout();
-                    pageIterator.Begin();
-
-                    while (pageIterator.Next(PageIteratorLevel.Block))
-                    {
-                        var found = false;
-
-                        while (pageIterator.Next(PageIteratorLevel.Para))
-                        {
-                            var counter = 0;
-
-                            while (pageIterator.Next(PageIteratorLevel.TextLine, PageIteratorLevel.Word))
-                                counter++;
-
-                            if (counter < 5) continue;
-                            found = pageIterator.TryGetBoundingBox(PageIteratorLevel.TextLine, out rect);
-                            break;
-                        }
-
-                        var croppedRect = new Rectangle(rect.X1, rect.Y1, rect.Width, rect.Height);
-                        if (rect.Height == 0)
-                            return DocumentInspectorPageOrientation.Undetectable;
-
-                        var croppedImage = found
-                            ? bitmap.Clone(croppedRect, bitmap.PixelFormat)
-                            : bitmap.Clone() as Bitmap;
-
-                        // The OCR confidence on the first run
-                        float firstMeanConfedence;
-
-                        // The OCR confidence on the second run
-                        float secondMeanConfedence;
-
-                        using (var engineCroppedImage = new TesseractEngine(TesseractDataPath, TesseractLanguage))
-                        {
-                            using (var imageNormal = PixConverter.ToPix(croppedImage))
-                            using (var pageNormal = engineCroppedImage.Process(imageNormal))
-                                firstMeanConfedence = pageNormal.GetMeanConfidence();
-
-                            if (firstMeanConfedence > 0.75)
-                                return DocumentInspectorPageOrientation.PageCorrect;
-
-                            // Rotate image 180 degrees
-                            croppedImage.RotateFlip(RotateFlipType.Rotate180FlipNone);
-                            //croppedImage.Save(@"d:\\Crop area flipped.tif", System.Drawing.Imaging.ImageFormat.Tiff);
-
-                            using (var imageRotated180 = PixConverter.ToPix(croppedImage))
-                            using (var pageRotated180 = engineCroppedImage.Process(imageRotated180))
-                                secondMeanConfedence = pageRotated180.GetMeanConfidence();
-                        }
-
-                        
-
-                        if (firstMeanConfedence > 0.75 && secondMeanConfedence > 0.75)
-                        {
-                            croppedImage.Dispose();
-                            return firstMeanConfedence >= secondMeanConfedence
-                                ? DocumentInspectorPageOrientation.PageCorrect
-                                : DocumentInspectorPageOrientation.PageUpsideDown;
-                        }
-                        else
-                        {
-                            double thridMeanConfedence;
-                            croppedImage.RotateFlip(RotateFlipType.Rotate90FlipNone);
-                            //croppedImage.Save(@"d:\\Crop area flipped.tif", System.Drawing.Imaging.ImageFormat.Tiff);
-
-                            using (var engineCroppedImage = new TesseractEngine(TesseractDataPath, TesseractLanguage))
-                            {
-                                using (var imageRotated90 = PixConverter.ToPix(croppedImage))
-                                using (var pageRotated90 = engineCroppedImage.Process(imageRotated90))
-                                    thridMeanConfedence = pageRotated90.GetMeanConfidence();
-                            }
-                            if(thridMeanConfedence > 0.75)
-                            {
-                                croppedImage.Dispose();
-                                return DocumentInspectorPageOrientation.PageRotatedRight;
-                            }
-                            else
-                            {
-                                double fourthMeanConfedence;
-                                croppedImage.RotateFlip(RotateFlipType.Rotate90FlipNone);
-                                //croppedImage.Save(@"d:\\Crop area flipped.tif", System.Drawing.Imaging.ImageFormat.Tiff);
-
-                                using (var engineCroppedImage = new TesseractEngine(TesseractDataPath, TesseractLanguage))
-                                {
-                                    using (var imageRotated90 = PixConverter.ToPix(croppedImage))
-                                    using (var pageRotated90 = engineCroppedImage.Process(imageRotated90))
-                                        fourthMeanConfedence = pageRotated90.GetMeanConfidence();
-                                }
-                                if(thridMeanConfedence > fourthMeanConfedence)
-                                {
-                                    croppedImage.Dispose();
-                                    return DocumentInspectorPageOrientation.PageRotatedLeft;
-                                }
-                                else
-                                {
-                                    croppedImage.Dispose();
-                                    return DocumentInspectorPageOrientation.PageUpsideDown;
-                                }
-                            }
-                        }
-
-                    }
-                }
-                return DocumentInspectorPageOrientation.Undetectable;
-            }
-
+            using (var image = PixConverter.ToPix(bitmap))
+            using (var page = engine.Process(image, PageSegMode.AutoOsd))
+                return (DocumentInspectorPageOrientation)(int)page.AnalyseLayout().GetProperties().Orientation;
         }
         #endregion
     }

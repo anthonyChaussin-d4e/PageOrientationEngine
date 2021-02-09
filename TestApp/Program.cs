@@ -8,9 +8,8 @@ namespace TestApp
     {
         static void Main(string[] args)
         {
-            var poe = new DocumentInspector(@"c:\Program Files (x86)\Tesseract-OCR\tessdata\", "eng");
-            var results = poe.DetectPageOrientation(@"d:\\example.tif");
-            foreach(var result in results)
+            var temp = new DocumentInspector(@".\tessdata", "fra").DetectPageOrientation(@"C:\Users\Anthony\Downloads\Test.tiff");
+            foreach (var result in temp)
                 Console.WriteLine(result.ToString());
 
             Console.ReadKey();
