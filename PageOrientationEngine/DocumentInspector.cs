@@ -3,10 +3,13 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
+using System.Globalization;
 using System.IO;
 using System.Linq;
-using System.Threading;
 using System.Threading.Tasks;
+
+using Ghostscript.NET;
+using Ghostscript.NET.Rasterizer;
 
 using PageOrientationEngine.Helpers;
 
@@ -14,82 +17,8 @@ using Tesseract;
 
 namespace PageOrientationEngine
 {
-    #region DocumentInspectorPageOrientation
-    /// <summary>
-    /// The orientation of the text on a page
-    /// </summary>
-    public enum DocumentInspectorPageOrientation
-    {
-        /// <summary>
-        /// The text on page is correctly orientated
-        /// </summary>
-        PageCorrect,
-
-        /// <summary>
-        /// The text on the page is rotated to the right
-        /// </summary>
-        PageRotatedRight,
-
-        /// <summary>
-        /// The text on the page is upside down
-        /// </summary>
-        PageUpsideDown,
-
-        /// <summary>
-        /// The text on the page is rotated to the left
-        /// </summary>
-        PageRotatedLeft,
-
-        /// <summary>
-        /// The quality of text on the page is to bad to determine the orientation of the page
-        /// </summary>
-        Undetectable
-    }
-    #endregion
-
     public class DocumentInspector
     {
-        #region Internal class WorkQueueItem
-        /// <summary>
-        /// Used to track all the workqueue items
-        /// </summary>
-        private class WorkQueueItem
-        {
-            /// <summary>
-            /// The number of the page
-            /// </summary>
-            public int PageNumber { get; private set; }
-
-            /// <summary>
-            /// The page as a memory stream
-            /// </summary>
-            public MemoryStream MemoryStream { get; private set; }
-
-            /// <summary>
-            /// Creates this object
-            /// </summary>
-            /// <param name="pageNumber">The number of the page</param>
-            /// <param name="memoryStream">The page as a memory stream</param>
-            public WorkQueueItem(int pageNumber, MemoryStream memoryStream)
-            {
-                PageNumber = pageNumber;
-                MemoryStream = memoryStream;
-            }
-        }
-        #endregion
-
-        #region Fields
-        /// <summary>
-        /// The load queue
-        /// </summary>
-        ConcurrentQueue<WorkQueueItem> _workQueue;
-
-        /// <summary>
-        /// Contains all the result of the page orientation detection
-        /// </summary>
-        private Dictionary<int, DocumentInspectorPageOrientation> _detectionResult;
-        #endregion
-
         #region Properties
         /// <summary>
         /// The path to the Tesseract data files
@@ -115,19 +44,6 @@ namespace PageOrientationEngine
         }
         #endregion
 
-        #region ProcessWorkQueue
-        /// <summary>
-        /// Takes one item out of the <see cref="_workQueue"/>, processes it and returns the output 
-        /// in the <see cref="_detectionResult"/> dictionary
-        /// </summary>
-        private void ProcessWorkQueue()
-        {
-            while (_workQueue.TryDequeue(out WorkQueueItem workQueueItem))
-                using (var bitmap = Image.FromStream(workQueueItem.MemoryStream) as Bitmap)
-                    _detectionResult.Add(workQueueItem.PageNumber, DetectPageOrientation(bitmap));
-        }
-        #endregion
-
         #region DetectPageOrientation
         /// <summary>
         /// Returns a list with <see cref="DocumentInspectorPageOrientation">DocumentInspectorPageOrientations</see>
@@ -135,44 +51,20 @@ namespace PageOrientationEngine
         /// </summary>
         /// <param name="memoryStreams"></param>
         /// <returns></returns>
-        public Dictionary<int, DocumentInspectorPageOrientation> DetectPageOrientation(List<MemoryStream> memoryStreams)
+        public List<Tuple<int, Orientation, Image>> DetectPageOrientation(List<MemoryStream> memoryStreams)
         {
-            _detectionResult = new Dictionary<int, DocumentInspectorPageOrientation>();
-            _workQueue = new ConcurrentQueue<WorkQueueItem>();
-
+            List<Task> taskList = new List<Task>();
+            List<Tuple<int, Orientation, Image>> result = new List<Tuple<int, Orientation, Image>>();
             // WorkQueue vullen
             var i = 1;
-            foreach (var memoryStream in memoryStreams)
+            memoryStreams.ForEach(m =>
             {
-                _workQueue.Enqueue(new WorkQueueItem(i, memoryStream));
+                taskList.Add(Task.Run(() => result.Add(Tuple.Create( i, this.DetectPageOrientation((Bitmap)Image.FromStream(memoryStreams[i - 1])), Image.FromStream(memoryStreams[i - 1])))));
                 i++;
-            }
+            });
+            Task.WaitAll(taskList.ToArray());
 
-            var procCount = Environment.ProcessorCount;
-            //var procCount = 4;
-
-            if (_workQueue.Count < procCount)
-                procCount = _workQueue.Count;
-
-            var threads = new Thread[procCount];
-
-            // Spawn threads
-            for (i = 0; i < procCount; i++)
-            {
-                ThreadStart threadStart = ProcessWorkQueue;
-                threads[i] = new Thread(threadStart);
-                threads[i].Start();
-            }
-
-            var workDone = false;
-
-            while (!workDone)
-            {
-                for (i = 0; i < procCount; i++)
-                    workDone = threads[i].Join(1000*60);
-            }
-
-            return _detectionResult;
+            return result;
         }
 
         /// <summary>
@@ -181,18 +73,52 @@ namespace PageOrientationEngine
         /// </summary>
         /// <param name="inputFile">The input file</param>
         /// <returns></returns>
-        public Dictionary<int, DocumentInspectorPageOrientation> DetectPageOrientation(string inputFile)
+        public List<Tuple<int, Orientation, Image>> DetectPageOrientation(string inputFile)
         {
-            return DetectPageOrientation(TiffUtils.SplitTiffImage(inputFile)).OrderBy(d => d.Key).ToDictionary(k => k.Key, v => v.Value);
+            string extention = Path.GetExtension(inputFile);
+            if (extention == ".tiff")
+            {
+                var result = DetectPageOrientation(TiffUtils.SplitTiffImage(inputFile));
+                result.Sort((t, t2) => t.Item1.CompareTo(t2.Item1));
+                return result;
+            }
+            else if (extention == ".pdf")
+            {
+                var _rasterizer = new GhostscriptRasterizer();
+                List<Tuple<int, Orientation, Image>> result = new List<Tuple<int, Orientation, Image>>();
+                List<Task> tasks = new List<Task>();
+
+                using (FileStream fs = File.Open(inputFile, FileMode.Open, FileAccess.Read))
+                {
+                    _rasterizer.Open(fs, new GhostscriptVersionInfo(new Version(0, 0, 0),
+                    Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "gsdll32.dll"),
+                    string.Empty, GhostscriptLicense.GPL), false);
+                }
+                for (int p = 1; p <= _rasterizer.PageCount; p++)
+                {
+                    Image img = _rasterizer.GetPage(300, p);
+                    tasks.Add(Task.Run(() => result.Add(Tuple.Create(p-1, DetectPageOrientation((Bitmap)img), img))));
+                }
+                _rasterizer.Close();
+                _rasterizer.Dispose();
+                Task.WaitAll(tasks.ToArray());
+                result.Sort((t, t2) => t.Item1.CompareTo(t2.Item1));
+                return result;
+            }
+            else
+            {
+                throw new ArgumentException("This file format is not supported yet.", nameof(inputFile));
+            }
+            
         }
 
         /// <summary>
-        /// Returns the <see cref="DocumentInspectorPageOrientation"/> of the <paramref name="bitmap"/> 
+        /// Returns the <see cref="Orientation"/> of the <paramref name="bitmap"/> 
         /// according to the text that is on it
         /// </summary>
         /// <param name="bitmap">The bitmap with text</param>
         /// <returns></returns>
-        public DocumentInspectorPageOrientation DetectPageOrientation(Bitmap bitmap)
+        public Orientation DetectPageOrientation(Bitmap bitmap)
         {
             if (bitmap == null)
                 throw new NullReferenceException("The bitmap parameter is not set");
@@ -203,7 +129,7 @@ namespace PageOrientationEngine
             using (var engine = new TesseractEngine(TesseractDataPath, TesseractLanguage))
             using (var image = PixConverter.ToPix(bitmap))
             using (var page = engine.Process(image, PageSegMode.AutoOsd))
-                return (DocumentInspectorPageOrientation)(int)page.AnalyseLayout().GetProperties().Orientation;
+                return page.AnalyseLayout().GetProperties().Orientation;
         }
         #endregion
     }

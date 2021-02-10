@@ -53,6 +53,9 @@
     <Compile Include="Helpers\UnsafeBitmap.cs" />
   </ItemGroup>
   <ItemGroup>
+    <PackageReference Include="Ghostscript.NET">
+      <Version>1.2.2</Version>
+    </PackageReference>
     <PackageReference Include="Tesseract">
       <Version>4.1.1</Version>
     </PackageReference>

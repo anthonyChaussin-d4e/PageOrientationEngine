@@ -19,8 +19,7 @@ namespace PageOrientationEngine.Helpers
         /// <returns></returns>
         public static int GetPageCount(string inputFile)
         {
-            var image = Image.FromFile(inputFile);
-            return GetPageCount(image, true);
+            return GetPageCount(Image.FromFile(inputFile), true);
         }
 
         /// <summary>
@@ -31,10 +30,7 @@ namespace PageOrientationEngine.Helpers
         /// <returns></returns>
         private static int GetPageCount(Image image, bool dispose)
         {
-            var guid = image.FrameDimensionsList[0];
-            var dimension = new FrameDimension(guid);
-
-            var pages = image.GetFrameCount(dimension);
+            int pages = image.GetFrameCount(new FrameDimension(image.FrameDimensionsList[0]));
 
             if (dispose)
                 image.Dispose();
@@ -55,30 +51,22 @@ namespace PageOrientationEngine.Helpers
         {
             using (var image = Image.FromFile(inputFile))
             {
-                var outputFile = outputFolder + Path.DirectorySeparatorChar +
-                                 Path.GetFileNameWithoutExtension(inputFile) + "_";
 
-                var output = new List<string>();
+                List<string> output = new List<string>();
 
-                var guid = image.FrameDimensionsList[0];
-                var frameDimension = new FrameDimension(guid);
-                
-                var pageCount = GetPageCount(image, false);
-
-                var encoderInfo = GetEncoderInfo("image/tiff");
-                var compression = Encoder.Compression;
-                var encoderParameters = new EncoderParameters(1);
-
-                // Save the bitmap as a TIFF file with CCITT4 compression.
-                var encoderParameter = new EncoderParameter(compression, (long) EncoderValue.CompressionCCITT4);
-                encoderParameters.Param[0] = encoderParameter;
-
-                for (var i = 0; i < pageCount; i++)
+                for (var i = 0; i < GetPageCount(image, false); i++)
                 {
-                    image.SelectActiveFrame(frameDimension, i);
+                    image.SelectActiveFrame(new FrameDimension(image.FrameDimensionsList[0]), i);
                     //Save the master bitmap
-                    var fileName = string.Format("{0}_pagina{1}.tif", outputFile, i + 1);
-                    image.Save(fileName, encoderInfo, encoderParameters);
+                    var fileName = string.Format("{0}_pagina{1}.tif", outputFolder + Path.DirectorySeparatorChar +
+                                 Path.GetFileNameWithoutExtension(inputFile) + "_", i + 1);
+                    image.Save(fileName, GetEncoderInfo("image/tiff"), new EncoderParameters(1)
+                    {
+                        Param = new[]
+                    {
+                        new EncoderParameter(Encoder.Compression, (long)EncoderValue.CompressionCCITT4)
+                    }
+                    });
                     output.Add(fileName);
                 }
 
@@ -94,33 +82,25 @@ namespace PageOrientationEngine.Helpers
         /// <returns></returns>
         public static List<MemoryStream> SplitTiffImage(string inputFile)
         {
-            using (var image = Image.FromFile(inputFile))
+            using (Image image = Image.FromFile(inputFile))
             {
-                var output = new List<MemoryStream>();
-
-                var guid = image.FrameDimensionsList[0];
-                var frameDimension = new FrameDimension(guid);
-
-                var pageCount = GetPageCount(image, false);
-
-                var encoderInfo = GetEncoderInfo("image/tiff");
-                var compression = Encoder.Compression;
-                var encoderParameters = new EncoderParameters(1);
-
-                // Save the bitmap as a TIFF file with CCIT4 compression.
-                var encoderParameter = new EncoderParameter(compression, (long)EncoderValue.CompressionCCITT4);
-                encoderParameters.Param[0] = encoderParameter;
-
-                for (var i = 0; i < pageCount; i++)
-                {
-                    image.SelectActiveFrame(frameDimension, i);
-                    var memoryStream = new MemoryStream();
-                    image.Save(memoryStream, encoderInfo, encoderParameters);
-                    output.Add(memoryStream);
-                }
-
-                return output;
+                return SplitToStream(image);
             }
+        }
+        private static List<MemoryStream> SplitToStream(Image image)
+        {
+            List<MemoryStream> output = new List<MemoryStream>();
+
+            for (var i = 0; i < GetPageCount(image, false); i++)
+            {
+                image.SelectActiveFrame(new FrameDimension(image.FrameDimensionsList[0]), i);
+                var memoryStream = new MemoryStream();
+                image.Save(memoryStream, GetEncoderInfo("image/tiff"), new EncoderParameters(1) { Param = new[] { new EncoderParameter(Encoder.Compression, (long)EncoderValue.CompressionCCITT4) } });
+                output.Add(memoryStream);
+            }
+
+            return output;
+
         }
 
         /// <summary>
@@ -133,30 +113,7 @@ namespace PageOrientationEngine.Helpers
         {
             using (var image = Image.FromStream(inputFile))
             {
-                var output = new List<MemoryStream>();
-
-                var guid = image.FrameDimensionsList[0];
-                var frameDimension = new FrameDimension(guid);
-
-                var pageCount = GetPageCount(image, false);
-
-                var encoderInfo = GetEncoderInfo("image/tiff");
-                var compression = Encoder.Compression;
-                var encoderParameters = new EncoderParameters(1);
-
-                // Save the bitmap as a TIFF file with CCIT4 compression.
-                var encoderParameter = new EncoderParameter(compression, (long) EncoderValue.CompressionCCITT4);
-                encoderParameters.Param[0] = encoderParameter;
-
-                for (var i = 0; i < pageCount; i++)
-                {
-                    image.SelectActiveFrame(frameDimension, i);
-                    var memoryStream = new MemoryStream();
-                    image.Save(memoryStream, encoderInfo, encoderParameters);
-                    output.Add(memoryStream);
-                }
-
-                return output;
+                return SplitToStream(image);
             }
         }
         #endregion
@@ -170,21 +127,24 @@ namespace PageOrientationEngine.Helpers
         /// <returns></returns>
         public static void ConcatenateTiffImages(List<string> inputFiles, string outputFile)
         {
-            var encoderInfo = GetEncoderInfo("image/tiff");
-
             var saveFlag = Encoder.SaveFlag;
-            var encoderParameters = new EncoderParameters(2);
-            encoderParameters.Param[0] = new EncoderParameter(saveFlag, (long)EncoderValue.MultiFrame);
-            encoderParameters.Param[1] = new EncoderParameter(Encoder.Compression, (long)EncoderValue.CompressionCCITT4);
+            var encoderParameters = new EncoderParameters(2)
+            {
+                Param = new[]
+                {
+                     new EncoderParameter(saveFlag, (long)EncoderValue.MultiFrame),
+                     new EncoderParameter(Encoder.Compression, (long)EncoderValue.CompressionCCITT4)
+                }
+            };
 
             Image firstImage = null;
 
-            foreach (var inputFile in inputFiles)
+            inputFiles.ForEach(inputFile =>
             {
                 if (firstImage == null)
                 {
                     firstImage = Image.FromFile(inputFile);
-                    firstImage.Save(outputFile, encoderInfo, encoderParameters);
+                    firstImage.Save(outputFile, GetEncoderInfo("image/tiff"), encoderParameters);
                 }
                 else
                 {
@@ -194,7 +154,7 @@ namespace PageOrientationEngine.Helpers
                     firstImage.SaveAdd(image, encoderParameters);
                     image.Dispose();
                 }
-            }
+            });
 
             if (firstImage != null)
                 firstImage.Dispose();
@@ -207,22 +167,24 @@ namespace PageOrientationEngine.Helpers
         /// <returns></returns>
         public static MemoryStream ConcatenateTiffImages(List<string> inputFiles)
         {
-            var encoderInfo = GetEncoderInfo("image/tiff");
-
             var saveFlag = Encoder.SaveFlag;
-            var encoderParameters = new EncoderParameters(2);
-            encoderParameters.Param[0] = new EncoderParameter(saveFlag, (long)EncoderValue.MultiFrame);
-            encoderParameters.Param[1] = new EncoderParameter(Encoder.Compression, (long)EncoderValue.CompressionCCITT4);
-
+            var encoderParameters = new EncoderParameters(2)
+            {
+                Param = new[]
+                {
+                     new EncoderParameter(saveFlag, (long)EncoderValue.MultiFrame),
+                     new EncoderParameter(Encoder.Compression, (long)EncoderValue.CompressionCCITT4)
+                }
+            };
             Image firstImage = null;
             var memoryStream = new MemoryStream();
-            
-            foreach (var inputFile in inputFiles)
+
+            inputFiles.ForEach(inputFile =>
             {
                 if (firstImage == null)
                 {
                     firstImage = Image.FromFile(inputFile);
-                    firstImage.Save(memoryStream, encoderInfo, encoderParameters);
+                    firstImage.Save(memoryStream, GetEncoderInfo("image/tiff"), encoderParameters);
                 }
                 else
                 {
@@ -232,7 +194,7 @@ namespace PageOrientationEngine.Helpers
                     firstImage.SaveAdd(image, encoderParameters);
                     image.Dispose();
                 }
-            }
+            });
 
             if (firstImage != null)
                 firstImage.Dispose();
@@ -251,22 +213,24 @@ namespace PageOrientationEngine.Helpers
         /// <param name="resolution"></param>
         public static void ChangeTiffResolution(string inputFile, string outputFile, int resolution)
         {
-            var encoderInfo = GetEncoderInfo("image/tiff");
             var saveFlag = Encoder.SaveFlag;
-            var encoderParameters = new EncoderParameters(2);
-
-            encoderParameters.Param[0] = new EncoderParameter(saveFlag, (long)EncoderValue.MultiFrame);
-            encoderParameters.Param[1] = new EncoderParameter(Encoder.Compression, (long)EncoderValue.CompressionCCITT4);
-
+            var encoderParameters = new EncoderParameters(2)
+            {
+                Param = new[]
+                {
+                     new EncoderParameter(saveFlag, (long)EncoderValue.MultiFrame),
+                     new EncoderParameter(Encoder.Compression, (long)EncoderValue.CompressionCCITT4)
+                }
+            };
             Bitmap outputBitmap = null;
 
-            foreach (var memoryStream in SplitTiffImage(inputFile))
+            SplitTiffImage(inputFile).ForEach(memoryStream =>
             {
                 if (outputBitmap == null)
                 {
                     outputBitmap = (Bitmap)Image.FromStream(memoryStream);
                     outputBitmap.SetResolution(resolution, resolution);
-                    outputBitmap.Save(outputFile, encoderInfo, encoderParameters);
+                    outputBitmap.Save(outputFile, GetEncoderInfo("image/tiff"), encoderParameters);
                 }
                 else
                 {
@@ -276,7 +240,7 @@ namespace PageOrientationEngine.Helpers
                     outputBitmap.SaveAdd(bitMap, encoderParameters);
                     bitMap.Dispose();
                 }
-            }
+            });
 
             if (outputBitmap != null)
                 outputBitmap.Dispose();
@@ -291,8 +255,7 @@ namespace PageOrientationEngine.Helpers
         /// <returns></returns>
         private static ImageCodecInfo GetEncoderInfo(string mimeType)
         {
-            var encoders = ImageCodecInfo.GetImageEncoders();
-            foreach (var encoder in encoders)
+            foreach (var encoder in ImageCodecInfo.GetImageEncoders())
             {
                 if (encoder.MimeType == mimeType)
                     return encoder;
